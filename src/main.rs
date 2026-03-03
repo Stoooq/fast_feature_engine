@@ -1,30 +1,32 @@
 pub mod batch;
 pub mod features;
+pub mod reader;
 
 use batch::DataBatch;
 use features::{FeatureGenerator, LogReturnGenerator};
-use polars::prelude::*;
+use reader::BatchReader;
 use std::time::Instant;
 
 fn main() -> polars::prelude::PolarsResult<()> {
-    let df = CsvReadOptions::default()
-        .with_n_rows(Some(40000))
-        .try_into_reader_with_file_path(Some("data/BTCUSDT-trades-2025-01.csv".into()))
-        .unwrap()
-        .finish()
-        .unwrap();
+    let batch_size = 50_000;
+    let tail_size = 5_000;
+    let directory_path = "data/";
 
-    let mut batch = DataBatch { df };
+    let reader = BatchReader::new(directory_path, batch_size, tail_size);
 
     let generator = LogReturnGenerator {
-        interval_ms: Some(5_000),
+        interval_ms: Some(1_000),
     };
 
-    let now = Instant::now();
-    generator.generate(&mut batch)?;
-    println!("{}", now.elapsed().as_micros());
+    for (i, current_batch) in reader.enumerate() {
+        let mut batch = DataBatch { df: current_batch };
 
-    println!("{}", batch);
+        let now = Instant::now();
+        generator.generate(&mut batch)?;
+        println!("Batch {}: {}", i, now.elapsed().as_micros());
+
+        println!("{}", batch);
+    }
 
     Ok(())
 }
