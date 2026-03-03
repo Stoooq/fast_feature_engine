@@ -1,0 +1,12 @@
+[package]
+name = "fast_feature_engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4.41"
+futures-util = "0.3.32"
+polars = { version = "0.53.0", features = ["lazy", "temporal", "describe", "json", "parquet", "dtype-datetime", "asof_join"] }
+tokio = { version = "1.49.0", features = ["full"] }
+tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
+url = "2.5.8"
