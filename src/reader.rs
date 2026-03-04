@@ -5,9 +5,11 @@ use std::path::PathBuf;
 
 pub struct BatchReader {
     file_list: std::vec::IntoIter<PathBuf>,
-    current_df: Option<DataFrame>,
-    current_offset: usize,
+    current_file_path: Option<PathBuf>,
+    current_file_offset: usize,
     previous_tail: Option<DataFrame>,
+
+    saved_columns: Option<Vec<String>>,
 
     batch_size: usize,
     tail_size: usize,
@@ -38,9 +40,10 @@ impl BatchReader {
 
         BatchReader {
             file_list: csv_files.into_iter(),
-            current_df: None,
-            current_offset: 0,
+            current_file_path: None,
+            current_file_offset: 0,
             previous_tail: None,
+            saved_columns: None,
             batch_size,
             tail_size,
         }
@@ -52,41 +55,65 @@ impl Iterator for BatchReader {
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut chunks_to_concat: Vec<DataFrame> = Vec::new();
-
         let mut collected_rows = 0;
 
         while collected_rows < self.batch_size {
-            if self.current_df.is_none() {
-                if let Some(path) = self.file_list.next() {
-                    let df = CsvReadOptions::default()
-                        .with_n_rows(Some(self.batch_size))
-                        .try_into_reader_with_file_path(Some(path))
+            if self.current_file_path.is_none() {
+                self.current_file_path = self.file_list.next();
+                self.current_file_offset = 0;
+            }
+
+            if let Some(path) = &self.current_file_path {
+                let rows_needed = self.batch_size - collected_rows;
+
+                let df = if self.current_file_offset == 0 {
+                    let loaded_df = CsvReadOptions::default()
+                        .with_has_header(true)
+                        .with_n_rows(Some(rows_needed))
+                        .try_into_reader_with_file_path(Some(path.clone()))
                         .unwrap()
                         .finish()
                         .unwrap();
 
-                    self.current_df = Some(df);
-                    self.current_offset = 0;
+                    if self.saved_columns.is_none() {
+                        let cols = loaded_df.get_column_names()
+                            .into_iter()
+                            .map(|c| c.to_string())
+                            .collect();
+                        self.saved_columns = Some(cols);
+                    }
+                    loaded_df
                 } else {
-                    break;
-                }
-            }
+                    let skip_lines = self.current_file_offset + 1;
+                    let mut loaded_df = CsvReadOptions::default()
+                        .with_has_header(false)
+                        .with_skip_rows(skip_lines)
+                        .with_n_rows(Some(rows_needed))
+                        .try_into_reader_with_file_path(Some(path.clone()))
+                        .unwrap()
+                        .finish()
+                        .unwrap();
 
-            if let Some(df) = &self.current_df {
-                let rows_needed = self.batch_size - collected_rows;
-                let rows_available = df.height() - self.current_offset;
-                let rows_to_take = std::cmp::min(rows_needed, rows_available);
+                    if let Some(cols) = &self.saved_columns {
+                        let cols_str: Vec<&str> = cols.iter().map(|c| c.as_str()).collect();
+                        loaded_df.set_column_names(&cols_str).unwrap();
+                    }
+                    loaded_df
+                };
 
-                if rows_to_take > 0 {
-                    let chunk = df.slice(self.current_offset as i64, rows_to_take);
-                    chunks_to_concat.push(chunk);
-                    collected_rows += rows_to_take;
-                    self.current_offset += rows_to_take;
+                let rows_read = df.height();
+
+                if rows_read > 0 {
+                    chunks_to_concat.push(df);
+                    collected_rows += rows_read;
+                    self.current_file_offset += rows_read;
                 }
 
-                if self.current_offset >= df.height() {
-                    self.current_df = None;
+                if rows_read < rows_needed {
+                    self.current_file_path = None;
                 }
+            } else {
+                break;
             }
         }
 
