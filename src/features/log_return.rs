@@ -32,7 +32,7 @@ impl FeatureGenerator for LogReturnGenerator {
     fn generate(&self, batch: &mut DataBatch) -> PolarsResult<()> {
         match self.interval_ms {
             None => {
-                let price = batch.df.column("price")?.f64()?;
+                let price = batch.df.column("price").expect("No column price").f64()?;
                 let price_prev = price.shift(1);
 
                 let mut log_return: Vec<Option<f64>> = price
@@ -52,16 +52,27 @@ impl FeatureGenerator for LogReturnGenerator {
                 batch.df.with_column(log_return_col)?;
             }
             Some(interval) => {
-                let prices = batch.df.column("price")?.f64()?;
-                let times = batch.df.column("time")?.i64()?;
+                let prices = batch.df.column("price").expect("No column price").f64()?;
+                let times = batch.df.column("time").expect("No column time").i64()?;
 
                 let prices_vec: Vec<f64> = prices.iter().filter_map(|x| x).collect();
                 let times_vec: Vec<i64> = times.iter().filter_map(|x| x).collect();
 
                 let values = self.compute_log_return(&times_vec, &prices_vec);
 
-                let col_str = format!("log_return_{}s", interval / 1000);
-                let log_return_col = Column::new(PlSmallStr::from_str(col_str.as_str()), values);
+                let col_str = match interval {
+                    i if i < 60_000 => {
+                        format!("log_return_{}s", interval / 1000)
+                    }
+                    i if i >= 60_000 => {
+                        format!("log_return_{}m", interval / (1000 * 60))
+                    }
+                    _ => {
+                        format!("log_return_{}s", interval / 1000)
+                    }
+                };
+
+                let log_return_col = Column::new(col_str.into(), values);
 
                 batch.df.with_column(log_return_col)?;
             }

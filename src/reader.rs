@@ -1,7 +1,7 @@
 use polars::prelude::*;
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct BatchReader {
     file_list: std::vec::IntoIter<PathBuf>,
@@ -15,13 +15,26 @@ pub struct BatchReader {
 
 impl BatchReader {
     pub fn new(directory_path: &str, batch_size: usize, tail_size: usize) -> Self {
-        let csv_files: Vec<PathBuf> = fs::read_dir(directory_path)
+        let mut csv_files: Vec<PathBuf> = fs::read_dir(directory_path)
             .expect("Can't read directory")
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .filter(|path| path.is_file())
             .filter(|path| path.extension() == Some(OsStr::new("csv")))
             .collect();
+
+        csv_files.sort_by_key(|path| {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+
+            let parts: Vec<&str> = stem.split("-").collect();
+            if parts.len() >= 2 {
+                format!("{}-{}", parts[parts.len() - 2], parts[parts.len() - 1])
+            } else {
+                stem.to_string()
+            }
+        });
+
+        println!("{:?}", csv_files);
 
         BatchReader {
             file_list: csv_files.into_iter(),
