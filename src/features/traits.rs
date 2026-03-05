@@ -1,6 +1,6 @@
 use crate::batch::DataBatch;
-use polars::prelude::PolarsResult;
+use polars::prelude::{Column, PolarsResult};
 
-pub trait FeatureGenerator {
-    fn generate(&self, batch: &mut DataBatch) -> PolarsResult<()>;
+pub trait FeatureGenerator: Send + Sync {
+    fn generate(&self, batch: &DataBatch) -> PolarsResult<Vec<Column>>;
 }

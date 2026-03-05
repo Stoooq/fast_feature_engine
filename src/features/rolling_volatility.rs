@@ -1,13 +1,19 @@
 use crate::batch::DataBatch;
 use crate::features::traits::FeatureGenerator;
 use polars::prelude::*;
+use rayon::prelude::*;
 
 pub struct RollingVolatility {
-    pub interval_ms: u64,
+    pub intervals_ms: Vec<u64>,
 }
 
 impl RollingVolatility {
-    fn compute_rolling_volatility(&self, times: &[i64], log_returns: &[f64]) -> Vec<Option<f64>> {
+    fn compute_rolling_volatility(
+        &self,
+        times: &[i64],
+        log_returns: &[f64],
+        interval: u64,
+    ) -> Vec<Option<f64>> {
         let n = times.len();
         let mut result = vec![None; n];
 
@@ -20,7 +26,7 @@ impl RollingVolatility {
             sum += current_return;
             sum_sq += current_return * current_return;
 
-            while times[right] - times[left] > self.interval_ms as i64 {
+            while times[right] - times[left] > interval as i64 {
                 let old_return = log_returns[left];
                 sum -= old_return;
                 sum_sq -= old_return * old_return;
@@ -47,8 +53,7 @@ impl RollingVolatility {
 }
 
 impl FeatureGenerator for RollingVolatility {
-    fn generate(&self, batch: &mut DataBatch) -> PolarsResult<()> {
-        // let prices = batch.df.column("price").expect("No column price").f64()?;
+    fn generate(&self, batch: &DataBatch) -> PolarsResult<Vec<Column>> {
         let times = batch.df.column("time").expect("No column time").i64()?;
         let log_returns = batch
             .df
@@ -56,26 +61,32 @@ impl FeatureGenerator for RollingVolatility {
             .expect("No column log_return")
             .f64()?;
 
-        let times_vec: Vec<i64> = times.iter().filter_map(|x| x).collect();
-        let log_returns_vec: Vec<f64> = log_returns.iter().filter_map(|x| x).collect();
+        let times_vec: Vec<i64> = times.into_iter().map(|x| x.unwrap_or(0)).collect();
+        let log_returns_vec: Vec<f64> = log_returns.into_iter().map(|x| x.unwrap_or(0.0)).collect();
 
-        let rolling_volatility = self.compute_rolling_volatility(&times_vec, &log_returns_vec);
+        let columns: Result<Vec<Column>, _> = self
+            .intervals_ms
+            .par_iter()
+            .map(|&interval| {
+                let rolling_volatility =
+                    self.compute_rolling_volatility(&times_vec, &log_returns_vec, interval);
 
-        let col_str = match self.interval_ms {
-            i if i < 60_000 => {
-                format!("rolling_volatility_{}s", self.interval_ms / 1000)
-            }
-            i if i >= 60_000 => {
-                format!("rolling_volatility_{}m", self.interval_ms / (1000 * 60))
-            }
-            _ => {
-                format!("rolling_volatility_{}s", self.interval_ms / 1000)
-            }
-        };
+                let col_str = match interval {
+                    i if i < 60_000 => {
+                        format!("rolling_volatility_{}s", interval / 1000)
+                    }
+                    i if i >= 60_000 => {
+                        format!("rolling_volatility_{}m", interval / (1000 * 60))
+                    }
+                    _ => {
+                        format!("rolling_volatility_{}s", interval / 1000)
+                    }
+                };
 
-        let rolling_volatility_col = Column::new(col_str.into(), rolling_volatility);
+                Ok(Column::new(col_str.into(), rolling_volatility))
+            })
+            .collect();
 
-        batch.df.with_column(rolling_volatility_col)?;
-        Ok(())
+        columns
     }
 }

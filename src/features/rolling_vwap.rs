@@ -1,13 +1,20 @@
 use crate::batch::DataBatch;
 use crate::features::traits::FeatureGenerator;
 use polars::prelude::*;
+use rayon::prelude::*;
 
 pub struct RollingVwap {
-    interval_ms: i64,
+    pub intervals_ms: Vec<u64>,
 }
 
 impl RollingVwap {
-    fn compute_rolling_vwap(&self, prices: &[f64], qty: &[f64], times: &[i64]) -> Vec<Option<f64>> {
+    fn compute_rolling_vwap(
+        &self,
+        prices: &[f64],
+        qty: &[f64],
+        times: &[i64],
+        interval: u64,
+    ) -> Vec<Option<f64>> {
         let n = times.len();
         let mut result = vec![None; n];
 
@@ -20,7 +27,7 @@ impl RollingVwap {
             qty_sum += current_qty;
             transactions_sum += current_qty * prices[right];
 
-            while times[right] - times[left] > self.interval_ms {
+            while times[right] - times[left] > interval as i64 {
                 let old_qty = qty[left];
                 qty_sum -= old_qty;
                 transactions_sum -= old_qty * prices[left];
@@ -47,31 +54,38 @@ impl RollingVwap {
 }
 
 impl FeatureGenerator for RollingVwap {
-    fn generate(&self, batch: &mut DataBatch) -> PolarsResult<()> {
+    fn generate(&self, batch: &DataBatch) -> PolarsResult<Vec<Column>> {
         let prices = batch.df.column("price").expect("No column price").f64()?;
         let qty = batch.df.column("qty").expect("No column qty").f64()?;
-        let times = batch.df.column("times").expect("No column times").i64()?;
+        let times = batch.df.column("time").expect("No column time").i64()?;
 
-        let prices_vec: Vec<f64> = prices.iter().filter_map(|x| x).collect();
-        let qty_vec: Vec<f64> = qty.iter().filter_map(|x| x).collect();
-        let times_vec: Vec<i64> = times.iter().filter_map(|x| x).collect();
+        let prices_vec: Vec<f64> = prices.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let qty_vec: Vec<f64> = qty.into_iter().map(|x| x.unwrap_or(0.0)).collect();
+        let times_vec: Vec<i64> = times.into_iter().map(|x| x.unwrap_or(0)).collect();
 
-        let rolling_vwap = self.compute_rolling_vwap(&prices_vec, &qty_vec, &times_vec);
+        let columns: Result<Vec<Column>, _> = self
+            .intervals_ms
+            .par_iter()
+            .map(|&interval| {
+                let rolling_vwap =
+                    self.compute_rolling_vwap(&prices_vec, &qty_vec, &times_vec, interval);
 
-        let col_str = match self.interval_ms {
-            i if i < 60_000 => {
-                format!("rolling_vwap_{}s", self.interval_ms / 1000)
-            }
-            i if i >= 60_000 => {
-                format!("rolling_volatility_{}m", self.interval_ms / (1000 * 60))
-            }
-            _ => {
-                format!("rolling_volatility_{}s", self.interval_ms / 1000)
-            }
-        };
+                let col_str = match interval {
+                    i if i < 60_000 => {
+                        format!("rolling_vwap_{}s", interval / 1000)
+                    }
+                    i if i >= 60_000 => {
+                        format!("rolling_vwap_{}m", interval / (1000 * 60))
+                    }
+                    _ => {
+                        format!("rolling_vwap_{}s", interval / 1000)
+                    }
+                };
 
-        let rolling_vwap_col = Column::new(col_str.into(), rolling_vwap);
-        batch.df.with_column(rolling_vwap_col)?;
-        Ok(())
+                Ok(Column::new(col_str.into(), rolling_vwap))
+            })
+            .collect();
+
+        columns
     }
 }

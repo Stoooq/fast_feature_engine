@@ -626,6 +626,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "polars",
+ "rayon",
  "tokio",
  "tokio-tungstenite",
  "url",
