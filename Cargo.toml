@@ -4,10 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+aws-config = "1.8.15"
+aws-sdk-s3 = "1.125.0"
 chrono = "0.4.41"
+dotenvy = "0.15.7"
 futures-util = "0.3.32"
 polars = { version = "0.53.0", features = ["lazy", "temporal", "describe", "json", "parquet", "dtype-datetime", "asof_join"] }
 rayon = "1.11.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
+toml = "1.0.4"
 url = "2.5.8"
