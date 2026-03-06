@@ -1,4 +1,5 @@
 pub mod batch;
+pub mod config;
 pub mod features;
 pub mod models;
 pub mod reader;
@@ -7,40 +8,34 @@ pub mod s3_uploader;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client;
 use batch::DataBatch;
+use config::Settings;
 use features::{FeatureGenerator, LogReturnGenerator, RollingVolatility, RollingVwap};
 use futures_util::StreamExt;
 use models::BinanceTrade;
 use polars::prelude::*;
 use reader::BatchReader;
 use s3_uploader::upload_to_s3;
+use std::fs;
 use std::fs::File;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let batch_size = 10_000;
-    let tail_size = 500;
-    let directory_path = "data/";
-    let output_path = "output/";
-
     dotenvy::dotenv().ok();
+    
+    let config_contents = fs::read_to_string("config.toml").unwrap();
+    let config: Arc<Settings> = Arc::new(toml::from_str(&config_contents).unwrap());
 
-    let aws_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-    let s3_client = Client::new(&aws_config);
-    let bucket_name = std::env::var("S3_BUCKET_NAME").unwrap();
+    println!("Running in config mode: {}", config.app.mode.to_uppercase());
 
-    let url = "wss://stream.binance.com:9443/ws/btcusdt@trade";
-    println!("Connecting with Binance");
-
-    let (ws_stream, _) = connect_async(url).await.unwrap();
-    println!("Connected");
-
-    let (_, mut read) = ws_stream.split();
-
-    let mut trade_buffer: Vec<BinanceTrade> = Vec::with_capacity(batch_size);
-    let mut batch_counter = 0;
+    let s3_client = if config.aws.upload_to_s3 {
+        let aws_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
+        Some(Client::new(&aws_config))
+    } else {
+        None
+    };
 
     let feature_generators: Arc<Vec<Box<dyn FeatureGenerator + Send + Sync>>> = Arc::new(vec![
         Box::new(LogReturnGenerator {
@@ -54,6 +49,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     ]);
 
+    let generators_clone = Arc::clone(&feature_generators);
+
+    match config.app.mode.as_str() {
+        "offline" => {
+            run_offline_engine(config, s3_client, generators_clone).await;
+        }
+        "live" => {
+            run_live_engine(config, s3_client, generators_clone).await;
+        }
+        _ => {
+            eprintln!(
+                "Unknown mode of operation in config.toml: {}. Use 'offline' or 'live'.",
+                config.app.mode
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_offline_engine(
+    config: Arc<Settings>,
+    s3_client: Option<aws_sdk_s3::Client>,
+    feature_generators: Arc<Vec<Box<dyn FeatureGenerator + Send + Sync>>>,
+) {
+    println!(
+        "Start reading from the catalog: {}",
+        config.offline.directory_path
+    );
+
+    let reader = BatchReader::new(
+        &config.offline.directory_path,
+        config.app.batch_size,
+        config.app.tail_size,
+    );
+
+    for (batch_id, current_batch) in reader.enumerate() {
+        let generators_clone = Arc::clone(&feature_generators);
+        let config_clone = Arc::clone(&config);
+
+        generate_features(
+            config_clone,
+            current_batch,
+            batch_id,
+            generators_clone,
+            s3_client.clone(),
+        )
+        .await;
+    }
+}
+
+async fn run_live_engine(
+    config: Arc<Settings>,
+    s3_client: Option<aws_sdk_s3::Client>,
+    feature_generators: Arc<Vec<Box<dyn FeatureGenerator + Send + Sync>>>,
+) {
+    println!("Connecting to WebSocket: {}", config.live.websocket_url);
+
+    let (ws_stream, _) = connect_async(config.live.websocket_url.clone())
+        .await
+        .unwrap();
+
+    let (_, mut read) = ws_stream.split();
+
+    let mut trade_buffer: Vec<BinanceTrade> = Vec::with_capacity(config.app.batch_size);
+    let mut batch_counter = 0;
+
     while let Some(msg) = read.next().await {
         let msg = msg.unwrap();
 
@@ -62,25 +124,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 trade_buffer.push(trade);
                 println!("{}", trade_buffer.len());
 
-                if trade_buffer.len() >= batch_size {
+                if trade_buffer.len() >= config.app.batch_size {
                     println!("New batch nr {}", batch_counter);
 
                     let buffer_to_process = trade_buffer.clone();
                     trade_buffer.clear();
 
-                    let s3_client_clone = s3_client.clone();
-                    let bucket_clone = bucket_name.to_string();
-                    let out_path = output_path.to_string();
                     let generators_clone = Arc::clone(&feature_generators);
+                    let config_clone = Arc::clone(&config);
+                    let s3_client_clone = s3_client.clone();
 
                     tokio::spawn(async move {
-                        process_and_upload_batch(
-                            buffer_to_process,
+                        let prices: Vec<f64> = buffer_to_process
+                            .iter()
+                            .map(|x| x.price.parse().unwrap())
+                            .collect();
+                        let volumes: Vec<f64> = buffer_to_process
+                            .iter()
+                            .map(|x| x.volume.parse().unwrap())
+                            .collect();
+                        let times: Vec<i64> = buffer_to_process.iter().map(|x| x.time).collect();
+
+                        let df = DataFrame::new(
+                            times.len(),
+                            vec![
+                                Column::new("price".into(), prices),
+                                Column::new("qty".into(), volumes),
+                                Column::new("time".into(), times),
+                            ],
+                        )
+                        .unwrap();
+
+                        generate_features(
+                            config_clone,
+                            df,
                             batch_counter,
-                            out_path,
-                            s3_client_clone,
-                            bucket_clone,
                             generators_clone,
+                            s3_client_clone,
                         )
                         .await;
                     });
@@ -90,54 +170,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-
-    Ok(())
 }
 
-async fn process_and_upload_batch(
-    raw_trades: Vec<BinanceTrade>,
+async fn generate_features(
+    config: Arc<Settings>,
+    current_batch: DataFrame,
     batch_id: usize,
-    output_path: String,
-    s3_client: Client,
-    bucket_name: String,
-    feature_generators: Arc<Vec<Box<dyn FeatureGenerator + Send + Sync>>>
+    feature_generators: Arc<Vec<Box<dyn FeatureGenerator + Send + Sync>>>,
+    s3_client: Option<aws_sdk_s3::Client>,
 ) {
-    let prices: Vec<f64> = raw_trades.iter().map(|x| x.price.parse().unwrap()).collect();
-    let volumes: Vec<f64> = raw_trades.iter().map(|x| x.volume.parse().unwrap()).collect();
-    let times: Vec<i64> = raw_trades.iter().map(|x| x.time).collect();
+    let config_clone = Arc::clone(&config);
 
-    let df = DataFrame::new(times.len(), vec![
-        Column::new("price".into(), prices),
-        Column::new("qty".into(), volumes),
-        Column::new("time".into(), times),
-    ]).unwrap();
-
-    let mut df = tokio::task::spawn_blocking(move || {
-        let mut batch = DataBatch { df };
+    let part_file_name = tokio::task::spawn_blocking(move || {
+        let mut batch = DataBatch { df: current_batch };
+        let now = Instant::now();
 
         for generator in feature_generators.iter() {
             let new_columns = generator.generate(&batch).unwrap();
             batch.df = batch.df.hstack(&new_columns).unwrap();
         }
 
-        // if i > 0 {
-        //     batch.df = batch
-        //         .df
-        //         .slice(tail_size as i64, batch.df.height() - tail_size);
-        // }
+        if batch_id > 0 {
+            batch.df = batch.df.slice(
+                config_clone.app.tail_size as i64,
+                batch.df.height() - config_clone.app.tail_size,
+            );
+        }
 
-        batch.df
-    }).await.unwrap();
+        println!("Batch {}: {}", batch_id, now.elapsed().as_micros());
 
-    let target_dir = format!("{}dataset_{}", output_path, chrono::Local::now().format("%Y%m%d"));
-    let part_file_name = format!("{}/part_{:04}.parquet", target_dir, batch_id);
-    std::fs::create_dir_all(&target_dir).unwrap();
-    let mut file = File::create(&part_file_name).unwrap();
-    ParquetWriter::new(&mut file).finish(&mut df).unwrap();
+        let target_dir = format!(
+            "{}dataset_{}",
+            config_clone.app.output_path,
+            chrono::Local::now().format("%Y%m%d")
+        );
+        let part_file_name_local = format!("{}/part_{:04}.parquet", target_dir, batch_id);
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let mut file = File::create(&part_file_name_local).unwrap();
+        ParquetWriter::new(&mut file).finish(&mut batch.df).unwrap();
 
-    let s3_dataset_dir = format!("dataset_{}", chrono::Local::now().format("%Y%m%d"));
-    let s3_key = format!("{}/part_{:04}.parquet", s3_dataset_dir, batch_id);
-    upload_to_s3(&s3_client, bucket_name.as_str(), &part_file_name, &s3_key)
-                .await
-                .unwrap();
+        part_file_name_local
+    })
+    .await
+    .unwrap();
+
+    if let Some(client) = &s3_client {
+        let s3_dataset_dir = format!("dataset_{}", chrono::Local::now().format("%Y%m%d"));
+        let s3_key = format!("{}/part_{:04}.parquet", s3_dataset_dir, batch_id);
+        upload_to_s3(
+            client,
+            config.aws.bucket_name.as_str(),
+            &part_file_name,
+            &s3_key,
+        )
+        .await
+        .unwrap();
+    }
 }

@@ -1,0 +1,15 @@
+[app]
+mode = "live" 
+batch_size = 10_000
+tail_size = 500
+output_path = "output/"
+
+[offline]
+directory_path = "data/"
+
+[live]
+websocket_url = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+
+[aws]
+bucket_name = "fast-feature-engine-project"
+upload_to_s3 = true 
