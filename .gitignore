@@ -2,3 +2,4 @@ target/
 data/
 output/
 .env
+config.toml

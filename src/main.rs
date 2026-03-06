@@ -24,7 +24,7 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-    
+
     let config_contents = fs::read_to_string("config.toml").unwrap();
     let config: Arc<Settings> = Arc::new(toml::from_str(&config_contents).unwrap());
 
@@ -114,6 +114,7 @@ async fn run_live_engine(
     let (_, mut read) = ws_stream.split();
 
     let mut trade_buffer: Vec<BinanceTrade> = Vec::with_capacity(config.app.batch_size);
+    let mut tail_buffer: Vec<BinanceTrade> = Vec::with_capacity(config.app.tail_size);
     let mut batch_counter = 0;
 
     while let Some(msg) = read.next().await {
@@ -127,7 +128,14 @@ async fn run_live_engine(
                 if trade_buffer.len() >= config.app.batch_size {
                     println!("New batch nr {}", batch_counter);
 
-                    let buffer_to_process = trade_buffer.clone();
+                    let current_new_trades = trade_buffer.clone();
+                    
+                    let mut buffer_to_process = tail_buffer.clone();
+                    buffer_to_process.extend(current_new_trades.clone());
+
+                    let tail_start_idx = current_new_trades.len().saturating_sub(config.app.tail_size);
+                    tail_buffer = current_new_trades[tail_start_idx..].to_vec();
+
                     trade_buffer.clear();
 
                     let generators_clone = Arc::clone(&feature_generators);

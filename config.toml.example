@@ -1,0 +1,15 @@
+[app]
+mode = "live" 
+batch_size = 100_000
+tail_size = 5_000
+output_path = "output/"
+
+[offline]
+directory_path = "data/"
+
+[live]
+websocket_url = "wss-url"
+
+[aws]
+bucket_name = "bucket-name"
+upload_to_s3 = true 
