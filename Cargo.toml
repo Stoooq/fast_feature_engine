@@ -17,3 +17,10 @@ tokio = { version = "1.49.0", features = ["full"] }
 tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
 toml = "1.0.4"
 url = "2.5.8"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "engine_benchmark"
+harness = false

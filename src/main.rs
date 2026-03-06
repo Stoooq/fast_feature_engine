@@ -1,20 +1,15 @@
-pub mod batch;
-pub mod config;
-pub mod features;
-pub mod models;
-pub mod reader;
-pub mod s3_uploader;
-
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client;
-use batch::DataBatch;
-use config::Settings;
-use features::{FeatureGenerator, LogReturnGenerator, RollingVolatility, RollingVwap};
+use fast_feature_engine::batch::DataBatch;
+use fast_feature_engine::config::Settings;
+use fast_feature_engine::features::{
+    FeatureGenerator, LogReturnGenerator, RollingVolatility, RollingVwap,
+};
+use fast_feature_engine::models::BinanceTrade;
+use fast_feature_engine::reader::BatchReader;
+use fast_feature_engine::s3_uploader::upload_to_s3;
 use futures_util::StreamExt;
-use models::BinanceTrade;
 use polars::prelude::*;
-use reader::BatchReader;
-use s3_uploader::upload_to_s3;
 use std::fs;
 use std::fs::File;
 use std::sync::Arc;
@@ -129,11 +124,13 @@ async fn run_live_engine(
                     println!("New batch nr {}", batch_counter);
 
                     let current_new_trades = trade_buffer.clone();
-                    
+
                     let mut buffer_to_process = tail_buffer.clone();
                     buffer_to_process.extend(current_new_trades.clone());
 
-                    let tail_start_idx = current_new_trades.len().saturating_sub(config.app.tail_size);
+                    let tail_start_idx = current_new_trades
+                        .len()
+                        .saturating_sub(config.app.tail_size);
                     tail_buffer = current_new_trades[tail_start_idx..].to_vec();
 
                     trade_buffer.clear();

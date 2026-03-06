@@ -3,3 +3,7 @@ data/
 output/
 .env
 config.toml
+.DS_Store
+venv/
+__pycache__/
+.pytest_cache/
